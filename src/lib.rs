@@ -47,6 +47,7 @@
 use std::collections::HashMap;
 use std::ffi::CStr;
 use std::mem;
+use std::os::fd::{AsRawFd, OwnedFd};
 use std::os::raw::{c_char, c_int, c_uint, c_void};
 use std::os::unix::io::RawFd;
 use std::sync::{Arc, Mutex};
@@ -183,7 +184,7 @@ impl Sioctl {
         Watcher {
             shared_ptr: self.shared_ptr,
             thread_handle: Some(thread_handle),
-            close_tx,
+            close_tx: close_tx.as_raw_fd(),
         }
     }
 }
@@ -275,7 +276,7 @@ impl Drop for Watcher {
     }
 }
 
-fn polling_thread(handle: Handle, close_rx: RawFd) {
+fn polling_thread(handle: Handle, close_rx: OwnedFd) {
     unsafe {
         let nfds = sioctl_nfds(handle.as_ptr()) as usize;
         let mut pollfds = Vec::with_capacity(nfds);
@@ -285,7 +286,7 @@ fn polling_thread(handle: Handle, close_rx: RawFd) {
         // Place the fd that indicates shutdown last, so that it's ignored by
         // sioctl_revents() which will only look at first nfds.
         pollfds.push(pollfd {
-            fd: close_rx,
+            fd: close_rx.as_raw_fd(),
             events: POLLIN,
             revents: 0,
         });
@@ -293,7 +294,7 @@ fn polling_thread(handle: Handle, close_rx: RawFd) {
         nfds += 1;
 
         loop {
-            while poll(pollfds.as_mut_ptr(), nfds as u32, -1) < 0 {
+            while poll(pollfds.as_mut_ptr(), nfds as u64, -1) < 0 {
                 let err = errno();
                 if err != EINTR {
                     panic!("sioctl err: {}", err);
@@ -302,7 +303,7 @@ fn polling_thread(handle: Handle, close_rx: RawFd) {
 
             // Check if Watcher has asked us to exit via close_rx.
             if i32::from(pollfds[close_nfd].revents) & SIGHUP > 0 {
-                nix::unistd::close(close_rx).unwrap();
+                nix::unistd::close(close_rx.as_raw_fd()).unwrap();
                 break;
             }
 
@@ -350,4 +351,3 @@ extern "C" fn ondesc(ptr: *mut c_void, desc: *mut sioctl_desc, value: c_int) {
 unsafe fn parse_string(ptr: &[c_char]) -> String {
     CStr::from_ptr(ptr.as_ptr()).to_str().unwrap().to_owned()
 }
-
